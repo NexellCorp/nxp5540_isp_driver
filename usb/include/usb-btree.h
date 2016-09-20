@@ -1,0 +1,12 @@
+#ifndef __USB_BTREE_H
+#define __USB_BTREE_H
+
+#include <linux/ioctl.h>
+
+#define BTREE_IOCTL_MAGIC	'b'
+#define BTREE_IOCTL_GET_DEVICE_ID	_IOR(BTREE_IOCTL_MAGIC, 0, int)
+#define BTREE_IOCTL_SET_SENSOR_ID	_IOWR(BTREE_IOCTL_MAGIC, 1)
+#define BTREE_IOCTL_READ	_IOR(BTREE_IOCTL_MAGIC, 2, int)
+#define BTREE_IOCTL_WRITE	_IOW(BTREE_IOCTL_MAGIC, 3, int)
+
+#endif
