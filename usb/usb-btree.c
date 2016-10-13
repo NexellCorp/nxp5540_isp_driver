@@ -268,13 +268,17 @@ retry:
 						dev->bulk_in_buffer,
 						chunk))
 			rv = -EFAULT;
-		else
+		else {
 			rv = chunk;
-
-		dev->bulk_in_copied += chunk;
-
-		if (dev->bulk_in_copied < count)
-			btree_recv_frame(dev, count - dev->bulk_in_copied);
+			dev->bulk_in_copied += chunk;
+		}
+		if (dev->bulk_in_copied < count) {
+			rv = btree_recv_frame(dev, count - dev->bulk_in_copied);
+			if (rv < 0)
+				goto exit;
+			else
+				goto retry;
+		}
 	} else {
 		rv = btree_recv_frame(dev, count);
 		if (rv < 0)
