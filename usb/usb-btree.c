@@ -107,7 +107,7 @@ static void btree_read_bulk_callback(struct urb *urb)
 						__func__, urb->status);
 		dev->errors = urb->status;
 	} else {
-		dev->bulk_in_filled = urb->actual_length;
+		dev->bulk_in_filled += urb->actual_length;
 	}
 	dev->ongoing_read = 0;
 	spin_unlock(&dev->err_lock);
@@ -133,9 +133,6 @@ static int btree_recv_frame
 	spin_lock_irq(&dev->err_lock);
 	dev->ongoing_read = 1;
 	spin_unlock_irq(&dev->err_lock);
-
-	dev->bulk_in_filled = 0;
-	dev->bulk_in_copied = 0;
 
 	rv = usb_submit_urb(dev->bulk_in_urb, GFP_KERNEL);
 	if (rv < 0) {
@@ -232,7 +229,9 @@ static ssize_t btree_read(struct file *file, char *buffer, size_t count,
 		goto exit;
 	}
 
-retry: 
+	dev->bulk_in_copied = 0;
+	dev->bulk_in_filled = 0;
+retry:
 	spin_lock_irq(&dev->err_lock);
 	ongoing_io = dev->ongoing_read;
 	spin_unlock_irq(&dev->err_lock);
@@ -265,8 +264,8 @@ retry:
 			else
 				goto retry;
 		}
-		if (copy_to_user(buffer,
-						dev->bulk_in_buffer + dev->bulk_in_copied,
+		if (copy_to_user(buffer + dev->bulk_in_copied,
+						dev->bulk_in_buffer,
 						chunk))
 			rv = -EFAULT;
 		else
@@ -274,8 +273,8 @@ retry:
 
 		dev->bulk_in_copied += chunk;
 
-		if (available < count)
-			btree_recv_frame(dev, count - chunk);
+		if (dev->bulk_in_copied < count)
+			btree_recv_frame(dev, count - dev->bulk_in_copied);
 	} else {
 		rv = btree_recv_frame(dev, count);
 		if (rv < 0)
