@@ -16,6 +16,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+/* work queue */
 #include <linux/module.h>    /* included for all kernel modules */
 #include <linux/kernel.h>    /* included for KERN_INFO */
 #include <linux/init.h>      /* included for __init and __exit macros */
@@ -27,24 +28,20 @@
 #include <linux/platform_device.h> /* platform device */
 #include <linux/of.h> /* of */
 #include <linux/usb.h> /* usb */
-
+#include <linux/workqueue.h>
 /* v4l2 */
 #include <linux/videodev2.h>
 /* temp for vb2_dc_buf structure */
 #include <media/videobuf2-memops.h>
-
-/* funtions related to btree usb driver */
-struct btree_usb *udev = NULL;
 
 #include <media/v4l2-device.h> /* v4l2 device */
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-dev.h> /* video device */
 #include <media/videobuf2-core.h> /* vb2_mem_ops */
 #include <media/videobuf2-dma-contig.h> /* vb2, queue */
-#include "btree-v4l2.h"
 
-static void btree_video_done_buffer(struct btree_video *me);
-static int btree_video_update_buffer(struct btree_video *me);
+#include "btree-usb.h"
+#include "btree-v4l2.h"
 
 static struct vb2_dc_buf {
 	struct device           *dev;
@@ -64,167 +61,26 @@ static struct vb2_dc_buf {
 	struct dma_buf_attachment   *db_attach;
 };
 
-int btree_usb_msg(struct btree_usb *dev, unsigned int cmd,
-				char *buf, int index)
+static int set_stream_onoff(void *priv, int onoff)
 {
-	int ret = -1;
+	int ret = -EINVAL;
 
-	ret = btree_ctrl_msg(dev, cmd, USB_DIR_IN, index, buf, BTREE_USB_RET_SIZE);
-	printk("[%s] ret = %d \n", __func__, ret);
-
+	ret = btree_capture_enable(priv, onoff);
 	return ret;
 }
 
-static unsigned int btree_video_readUSBReg(unsigned int address)
+static int read_frame(void *priv,
+		dma_addr_t addr, unsigned int size)
 {
-	int ret = -ENODEV;
-	unsigned char buf[BTREE_USB_RET_SIZE] = {0, };
-	unsigned int addr_h = 0, addr_l = 0;
-	unsigned int data_h =0, data_l = 0, data = 0;
-
-	printk("[%s] \n", __func__);
-
-	addr_h = ((address >> 7) & 0x01FE);
-	addr_l = ((address << 1) & 0x01FE) | 0x0200;
-	printk("addr = 0x%4x, addr_l = 0x%2x, addr_h = 0x%2x\n",
-			address, addr_l, addr_h);
-	ret = btree_usb_msg(udev, USB_CMD_MCU_HOLD, buf, 1);
-	if (ret) {
-		printk(" failed to hold mcu \n");
-		return ret;
-	}
-
-	ret = btree_i2c_read(udev, USB_CMD_I2C_READ_16, addr_h, buf, BTREE_USB_RET_SIZE);
-	if (ret) {
-		printk(" failed to read register\n");
-		return ret;
-	}
-	printk("result = %d, data = 0x%4x \n",
-			buf[4], ((buf[0]<<8)+buf[1]));
-	ret = btree_i2c_read(udev, USB_CMD_I2C_READ_16, addr_l, buf, BTREE_USB_RET_SIZE);
-	if (ret) {
-		printk(" failed to read register\n");
-		return ret;
-	}
-	data_h = ((buf[0]<<8)+buf[1]);
-	printk("result = %d, data = 0x%4x \n",
-			buf[4], data_h);
-	ret = btree_i2c_read(udev, USB_CMD_I2C_READ_16, addr_l, buf, BTREE_USB_RET_SIZE);
-	if (ret) {
-		printk(" failed to read register\n");
-		return ret;
-	}
-	data_l = ((buf[0]<<8)+buf[1]);
-	printk("result = %d, data = 0x%4x \n",
-			buf[4], data_l);
-
-	data = ((data_h << 16) | data_l);
-	printk(" data = 0x%x \n", data);
-
-	ret = btree_usb_msg(udev, USB_CMD_MCU_HOLD, buf, 0);
-	if (ret) {
-		printk(" failed to release mcu \n");
-		return ret;
-	}
-
-	return data;
-}
-
-static int btree_video_writeUSBReg
-(unsigned int address, unsigned int data)
-{
-	int ret = -ENODEV;
-	unsigned char buf[BTREE_USB_RET_SIZE] = {0, };
-	unsigned int addr_h = 0, addr_l = 0;
-	unsigned int data_h =0, data_l = 0;
-	printk("[%s] addr = 0x%4x, data = 0x%x \n",
-			__func__, address, data);
-
-	data_h = (( data >> 16) & 0xFFFF );
-	data_l = (data&0xFFFF);
-	printk(" data_h = %d, data_l = %d \n",
-			data_h, data_l);
-
-	addr_h = ((address >> 7) & 0x01FE);
-	addr_l = ((address << 1) & 0x01FE) | 0x0200;
-	printk("addr_l = 0x%2x, addr_h = 0x%2x \n",
-			addr_l, addr_h);
-
-	ret = btree_usb_msg(udev, USB_CMD_MCU_HOLD, buf, 1);
-	if (ret) {
-		printk(" failed to hold mcu \n");
-		return ret;
-	}
-
-	ret = btree_i2c_write
-		(udev, USB_CMD_I2C_WRITE_16, data_h, addr_h, buf, BTREE_USB_RET_SIZE);
-	if (ret) {
-		printk(" failed to read register\n");
-		return ret;
-	}
-	printk("result = %d \n",buf[0]);
-	ret = btree_i2c_write
-		(udev, USB_CMD_I2C_WRITE_16, data_l, addr_l, buf, BTREE_USB_RET_SIZE);
-	if (ret) {
-		printk(" failed to read register\n");
-		return ret;
-	}
-	printk("result = %d \n", buf[0]);
-	ret = btree_usb_msg(udev, USB_CMD_MCU_HOLD, buf, 0);
-	if (ret) {
-		printk(" failed to release mcu \n");
-		return ret;
-	}
-
+	int ret = -EINVAL;
+	ret = btree_read_frame(priv, addr, size);
+	if (ret)
+		pr_err("failed to read frame \n");
 	return ret;
 }
 
-static int btree_video_checkUSB(void)
+static int btree_video_read_frame(struct btree_video *me)
 {
-	int ret = -ENODEV;
-	unsigned char buf[BTREE_USB_RET_SIZE] = {0, };
-
-	printk("[%s]\n",__func__);
-
-	ret = btree_usb_msg(udev, USB_CMD_DEVICE_INIT, buf, 0);
-	if (ret) {
-		printk(" failed to btree usb device init \n");
-		return ret;
-	}
-	printk(" vendor string is %s \n", buf);
-	ret = btree_usb_msg(udev, USB_CMD_SET_SENSOR_ID, buf, BTREE_SENSOR_ID);
-	if (ret) {
-		printk(" failed to set sensor ID \n");
-		return ret;
-	}
-	printk(" sensor id is 0x%x \n", (buf[0] & 0x00FF) );
-	return ret;
-}
-
-static int btree_video_captureEnable(int enable)
-{
-
-	int ret = -EFAULT;
-	unsigned char buf[BTREE_USB_RET_SIZE] = {0, };
-	printk(" %s - %s \n", __func__,
-			(enable)?"enable":"disable");
-
-	ret = btree_usb_msg(udev, USB_CMD_CAPTURE, buf, enable);
-	if (ret) {
-		pr_err(" failed to change capture status to %d \n", enable);
-		return ret;
-	}
-	printk("capture enable status is %d \n", buf[0]);
-	if (buf[0] != enable)
-		ret = -EFAULT;
-
-	return ret;
-}
-
-static int btree_video_readframe(struct btree_video *me)
-{
-	unsigned long flags = 0;
-	struct btree_video_buffer *buf = NULL;
 	int ret = -EINVAL;
 	unsigned int i = 0;
 	struct vb2_buffer *vb = NULL;
@@ -234,7 +90,14 @@ static int btree_video_readframe(struct btree_video *me)
 
 	printk("[%s] \n", __func__);
 
-retry:
+	if (!me->cur_buf)
+		return -ENOMEM;
+	printk(" call stream on function \n");
+	ret = set_stream_onoff(me->priv, 1);
+	if (ret) {
+		pr_err(" failed to stream on \n");
+		return ret;
+	}
 	vb = me->cur_buf->priv;
 	dc_buf = vb->planes[0].mem_priv;
 	sgt = dc_buf->dma_sgt;
@@ -243,19 +106,39 @@ retry:
 				pr_err("buf size is too big to be transferred at once \n");
 				return -ENOMEM;
 			}
-			//pr_err("[%d] dmaaddr = 0x%x, buf_size = %d \n",
-			//	i, sg_dma_address(s), sg_dma_len(s));
-			ret = btree_read_frame(udev, sg_dma_address(s), sg_dma_len(s));
-			if (ret) {
-				pr_err("failed to read frame \n");
-				return ret;
-			}
+			ret = read_frame(me->priv, sg_dma_address(s), sg_dma_len(s));
 	}
-	btree_video_done_buffer(me);
-	ret = btree_video_update_buffer(me);
-	if (!ret)
-		goto retry;
-	return 0;
+
+	printk(" call stream off function \n");
+	ret = set_stream_onoff(me->priv, 0);
+	if (ret) {
+		pr_err(" failed to stream off \n");
+		return ret;
+	}
+	return ret;
+}
+
+/* functions related to work queue */
+static void btree_video_read_handler(struct work_struct *work)
+{
+	int rv = -1;
+	struct btree_video *me =
+		container_of(work, struct btree_video, read_work);
+
+	pr_err("[%s] \n", __func__);
+	rv = btree_video_update_buffer(me);
+	if (rv) {
+		pr_err("failed to update buffer \n");
+		schedule_delayed_work(&me->read_work, 100);
+	} else {
+		rv =  btree_video_read_frame(me);
+		if ( rv < 0)
+			pr_err("failed to read frame \n");
+		else {
+			btree_video_done_buffer(me);
+			schedule_delayed_work(&me->read_work, 50);
+		}
+	}
 }
 
 
@@ -430,14 +313,15 @@ static void btree_vb2_buf_cleanup(struct vb2_buffer *vb)
 }
 
 /* real queue */
-static int btree_video_update_buffer(struct btree_video *me)
+int btree_video_update_buffer(struct btree_video *me)
 {
 	unsigned long flags;
 	struct btree_video_buffer *buf;
 
-	printk("[%s] \n", __func__);
+	pr_err("[%s] \n", __func__);
 	spin_lock_irqsave(&me->slock, flags);
 	if (me->buffer_count == 0) {
+		pr_err(" buffer count is null \n");
 		me->cur_buf = NULL;
 		spin_unlock_irqrestore(&me->slock, flags);
 		return -ENOENT;
@@ -450,12 +334,12 @@ static int btree_video_update_buffer(struct btree_video *me)
 	return 0;
 }
 
-static void btree_video_done_buffer(struct btree_video *me)
+void btree_video_done_buffer(struct btree_video *me)
 {
 	unsigned long flags;
 	struct btree_video_buffer *buf;
 
-	printk("[%s]\n",__func__);
+	pr_err("[%s]\n",__func__);
 
 	spin_lock_irqsave(&me->slock, flags);
 	buf = me->cur_buf;
@@ -593,13 +477,32 @@ static int btree_video_get_format(struct file *file, void *fh,
 	return 0;
 }
 
+static void check_device_plane_size(
+		void *priv, int width, int height)
+{
+	int device_w = 0, device_h = 0;
+	unsigned int data = 0;
+
+	data = ((width << 16) | height);
+	if (!btree_write_reg(priv, 0x0000, data)) {
+		data = btree_read_reg(priv, 0x0000);
+		if(data > 0) {
+			device_w = ((data >> 16) & 0xFFFF);
+			device_h = data & 0xFFFF;
+			printk(" width[%d], height[%d] \n", device_w, device_h);
+			if ((device_w != width) || (device_h != height))
+				pr_err("width or height is not matched with the frame info\n");
+		} else
+			pr_err("failed to set width and height \n");
+	}
+}
+
 static int btree_video_set_format(struct file *file, void *fh,
 							struct v4l2_format *f)
 {
 	struct btree_video *me = file->private_data;
 	struct btree_video_frame *frame;
 	uint32_t width, height, pixelformat, colorspace, field;
-	unsigned int data;
 
 	printk("[%s]\n",__func__);
 
@@ -646,19 +549,8 @@ static int btree_video_set_format(struct file *file, void *fh,
 
 	printk("width = %d, height = %d,pixelformat = 0x%x, colorspace = %d, field = %d\n",
 			frame->width, frame->height, frame->format.pixelformat, colorspace, field);
+	check_device_plane_size(me->priv, frame->width, frame->height);
 
-	data = ((width << 16) | height);
-	if (!btree_video_writeUSBReg(0x0000, data)) {
-		data = btree_video_readUSBReg(0x0000);
-		if(data > 0) {
-			width = ((data >> 16) & 0xFFFF);
-			height = data & 0xFFFF;
-			printk(" width[%d], height[%d] \n", width, height);
-			if ((width != frame->width) || (height != frame->height))
-				pr_err("width or height is not matched with the frame info\n");
-		} else
-			pr_err("failed to set width and height \n");
-	}
 	return 0;
 }
 
@@ -705,13 +597,13 @@ static int btree_video_dqbuf(struct file *file, void *fh,
 	struct btree_video *me = file->private_data;
 	int ret = -EINVAL;
 
-	printk("[%s]\n",__func__);
+	pr_err("[%s]\n",__func__);
 
 	if (me->vbq) {
-		printk(" dqbuf \n");
+		pr_err(" dqbuf \n");
 		ret = vb2_dqbuf(me->vbq, b, file->f_flags & O_NONBLOCK);
 	}
-	printk("ret = %d \n",ret);
+	pr_err("ret = %d \n",ret);
 	return ret;
 }
 
@@ -728,21 +620,7 @@ static int btree_video_streamon(struct file *file, void *fh, enum v4l2_buf_type 
 					me->name);
 			return ret;
 		}
-		// TODO : call stream on
-		printk(" call stream on function \n");
-		ret = btree_video_captureEnable(1);
-		if (ret) {
-			pr_err(" failed to stream on \n");
-			return ret;
-		}
-		ret = btree_video_update_buffer(me);
-		if (ret)
-			pr_err("failed to update buffer \n");
-
-		printk(" read frame data \n");
-		ret = btree_video_readframe(me);
-		if (ret)
-			pr_err(" failed to get frame data \n");
+		schedule_delayed_work(&me->read_work, 1);
 	}
    return ret;
 }
@@ -755,7 +633,8 @@ static int btree_video_streamoff(struct file *file, void *fh, enum v4l2_buf_type
 	printk("[%s]\n",__func__);
 	if (me->vbq) {
 		// TODO : call stream off
-		ret = btree_video_captureEnable(0);
+		cancel_delayed_work(&me->read_work);
+		ret = set_stream_onoff(me->priv, 0);
 		if (ret) {
 			pr_err("[btree video] failed to subdev s_stream for %s\n",
 					me->name);
@@ -783,6 +662,11 @@ static struct v4l2_ioctl_ops btree_video_ioctl_ops = {
  * v4l2_file_operations
  */
 
+static int check_device(void *priv)
+{
+	return btree_check_device(priv);
+}
+
 static int btree_video_open(struct file *file)
 {
 	struct btree_video *me = video_drvdata(file);
@@ -795,9 +679,12 @@ static int btree_video_open(struct file *file)
 	me->open_count++;
 	file->private_data = me;
 
-	ret = btree_video_checkUSB();
+	ret = check_device(me->priv);
 	if (ret)
 		pr_err(" btree usb device is not ready \n");
+
+	pr_err("init work queue \n");
+	INIT_DELAYED_WORK(&me->read_work, btree_video_read_handler);
 	return ret;
 }
 
@@ -806,6 +693,7 @@ static int btree_video_release(struct file *file)
 	struct btree_video *me = video_drvdata(file);
 	int ret = 0;
 	printk("[%s]\n",__func__);
+	cancel_delayed_work(&me->read_work);
 	me->open_count--;
 	if (me->open_count == 0) {
 		// TODO : call usb close??
@@ -822,12 +710,6 @@ static struct v4l2_file_operations btree_video_fops = {
 	.open           = btree_video_open,
 	.release        = btree_video_release,
 };
-
-int	btree_video_setUSBHandle(struct btree_usb *dev)
-{
-	udev = dev;
-	return 0;
-}
 
 struct btree_video *btree_video_create(char *name, uint32_t type,
 									struct v4l2_device *v4l2_dev,
@@ -848,6 +730,7 @@ struct btree_video *btree_video_create(char *name, uint32_t type,
 	me->type	= type;
 	me->v4l2_dev = v4l2_dev;
 	me->vb2_alloc_ctx = vb2_alloc_ctx;
+	me->open_count = 0;
 	mutex_init(&me->lock);
 
 	me->vdev.fops	= &btree_video_fops;
@@ -884,7 +767,7 @@ struct btree_video *btree_video_create(char *name, uint32_t type,
 	me->vdev.v4l2_dev = me->v4l2_dev;
 	video_set_drvdata(&me->vdev, me);
 	ret = video_register_device(&me->vdev, VFL_TYPE_GRABBER,
-								1/*video_device_number*/);
+								7/*video_device_number*/);
 	if (ret < 0 ) {
 		pr_err("failed to video_register_device() \n");
 		if(vbq)
@@ -942,23 +825,3 @@ int btree_v4l2_unregister_device
 }
 EXPORT_SYMBOL_GPL(btree_v4l2_unregister_device);
 
-#if 0
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("HyejungKwon");
-MODULE_DESCRIPTION("A Simple v4l2 driver module for BTree");
-
-
-static int __init btree_v4l2_init(void)
-{
-	printk(KERN_INFO "%s\n", __func__);
-	return 0;    // Non-zero return means that the module couldn't be loaded
-}
-
-static void __exit btree_v4l2_cleanup(void)
-{
-	printk(KERN_INFO "Cleaning up btree v4l2 module.\n");
-}
-
-module_init(btree_v4l2_init);
-module_exit(btree_v4l2_cleanup);
-#endif

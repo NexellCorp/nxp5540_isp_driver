@@ -24,7 +24,6 @@
 #define	BTREE_VIDEO_MAX_PLANES	3
 
 #include <linux/spinlock.h>
-#include "btree-usb.h"
 
 struct btree_video_format {
 	char *name;
@@ -56,13 +55,6 @@ struct btree_video_buffer {
 
 typedef int (*btree_queue_func)(struct btree_video_buffer *, void*);
 
-struct btree_video_buffer_object {
-	struct btree_video *video;
-	struct list_head buffer_list;
-	spinlock_t slock;
-	atomic_t buffer_count;
-};
-
 enum btree_video_type {
 	BTREE_VIDEO_TYPE_CAPTURE = 0,
 	BTREE_VIDEO_TYPE_OUT,
@@ -85,6 +77,7 @@ struct btree_video {
 	struct list_head buffer_list;
 	int	buffer_count;
 	struct btree_video_buffer *cur_buf;
+	struct delayed_work read_work;
 
 	struct mutex lock; /* for video_device */
 	struct video_device vdev;
@@ -94,6 +87,8 @@ struct btree_video {
 	struct btree_video_frame frame[2];
 	uint32_t open_count;
 
+	/* for saving btree_usb pointer */
+	void *priv;
 };
 
 /* macros */
@@ -101,8 +96,6 @@ struct btree_video {
 #define vbq_to_btree_video(vbq) container_of(vbq, struct btree_video, vbq)
 
 /* public functions */
-
-int btree_video_setUSBHandle(struct btree_usb *dev);
 
 struct btree_video *btree_video_create
 (char *, uint32_t, struct v4l2_device *, void *);
@@ -114,4 +107,6 @@ int btree_v4l2_register_device
 
 int btree_v4l2_unregister_device(struct v4l2_device *v4l2_dev);
 
+void btree_video_done_buffer(struct btree_video *me);
+int btree_video_update_buffer(struct btree_video *me);
 #endif
