@@ -16,7 +16,6 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/* work queue */
 #include <linux/module.h>    /* included for all kernel modules */
 #include <linux/kernel.h>    /* included for KERN_INFO */
 #include <linux/init.h>      /* included for __init and __exit macros */
@@ -28,6 +27,7 @@
 #include <linux/platform_device.h> /* platform device */
 #include <linux/of.h> /* of */
 #include <linux/usb.h> /* usb */
+/* work queue */
 #include <linux/workqueue.h>
 /* v4l2 */
 #include <linux/videodev2.h>
@@ -43,6 +43,7 @@
 #include "btree-usb.h"
 #include "btree-v4l2.h"
 
+extern int vb2_debug;
 static struct vb2_dc_buf {
 	struct device           *dev;
 	void                *vaddr;
@@ -50,17 +51,15 @@ static struct vb2_dc_buf {
 	dma_addr_t          dma_addr;
 	enum dma_data_direction     dma_dir;
 	struct sg_table         *dma_sgt;
+	struct frame_vector             *vec;
 
 	/* MMAP related */
 	struct vb2_vmarea_handler   handler;
 	atomic_t            refcount;
 	struct sg_table         *sgt_base;
-	/* USERPTR related */
-	struct vm_area_struct       *vma;
 	/* DMABUF related */
 	struct dma_buf_attachment   *db_attach;
 };
-
 static int set_stream_onoff(void *priv, int onoff)
 {
 	int ret = -EINVAL;
@@ -275,7 +274,7 @@ static int btree_vb2_buf_init(struct vb2_buffer *vb)
 	struct btree_video_buffer **bufs;
 	struct btree_video_buffer *buf;
 	struct btree_video *me = vb->vb2_queue->drv_priv;
-	int index = vb->v4l2_buf.index;
+	int index = vb->index;
 	uint32_t type = vb->vb2_queue->type;
 	pr_err("%s: type(0x%x)\n", __func__, type);
 
@@ -303,7 +302,7 @@ static void btree_vb2_buf_cleanup(struct vb2_buffer *vb)
 	struct btree_video_buffer **bufs;
 	struct btree_video_buffer *buf;
 	struct btree_video *me = vb->vb2_queue->drv_priv;
-	int index = vb->v4l2_buf.index;
+	int index = vb->index;
 
 	bufs = me->bufs;
 
@@ -406,8 +405,8 @@ void btree_vb2_buf_queue(struct vb2_buffer *vb)
 	struct btree_video_buffer *buf;
 
 	printk("[%s] \n",__func__);
-	buf = me->bufs[vb->v4l2_buf.index];
-	printk(" buf = 0x%x, index = %d \n", me->bufs[vb->v4l2_buf.index], vb->v4l2_buf.index);
+	buf = me->bufs[vb->index];
+	printk(" buf = 0x%x, index = %d \n", me->bufs[vb->index], vb->index);
 
 	fill_btree_video_buffer(buf, vb);
     btree_video_add_buffer(me, buf);
@@ -583,11 +582,10 @@ static int btree_video_qbuf(struct file *file, void *fh,
 	int ret = -EINVAL;
 
 	printk("[%s]\n",__func__);
-	if (me->vbq)
+	if (me->vbq) {
 		ret = vb2_qbuf(me->vbq, b);
-
+	}
 	printk("ret = %d \n");
-
 	return ret;
 }
 
@@ -600,7 +598,6 @@ static int btree_video_dqbuf(struct file *file, void *fh,
 	pr_err("[%s]\n",__func__);
 
 	if (me->vbq) {
-		pr_err(" dqbuf \n");
 		ret = vb2_dqbuf(me->vbq, b, file->f_flags & O_NONBLOCK);
 	}
 	pr_err("ret = %d \n",ret);
@@ -647,9 +644,11 @@ static int btree_video_streamoff(struct file *file, void *fh, enum v4l2_buf_type
 }
 
 static struct v4l2_ioctl_ops btree_video_ioctl_ops = {
-	.vidioc_querycap				= btree_video_querycap,
-	.vidioc_g_fmt_vid_cap			= btree_video_get_format,
-	.vidioc_s_fmt_vid_cap			= btree_video_set_format,
+	.vidioc_querycap		= btree_video_querycap,
+	.vidioc_g_fmt_vid_cap		= btree_video_get_format,
+	.vidioc_s_fmt_vid_cap		= btree_video_set_format,
+	.vidioc_g_fmt_vid_cap_mplane	= btree_video_get_format,
+	.vidioc_s_fmt_vid_cap_mplane	= btree_video_set_format,
 	.vidioc_reqbufs                 = btree_video_reqbufs,
 	.vidioc_querybuf                = btree_video_querybuf,
 	.vidioc_qbuf                    = btree_video_qbuf,
@@ -719,6 +718,8 @@ struct btree_video *btree_video_create(char *name, uint32_t type,
 	struct vb2_queue *vbq = NULL;
 	struct btree_video *me = kzalloc(sizeof(*me), GFP_KERNEL);
 
+	vb2_debug = 1;
+
 	printk("%s \n", __func__);
 	if (!me) {
 		pr_err("failed to get memory for btree video\n");
@@ -754,6 +755,8 @@ struct btree_video *btree_video_create(char *name, uint32_t type,
 	vbq->drv_priv = me;
 	vbq->ops = &btree_vb2_ops;
 	vbq->mem_ops = &vb2_dma_contig_memops;
+	vbq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
+
 	ret = vb2_queue_init(vbq);
 	if (ret < 0) {
 		pr_err("failed to vb2_queue_init() : %d \n", ret);
