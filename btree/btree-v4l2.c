@@ -34,14 +34,22 @@
 /* temp for vb2_dc_buf structure */
 #include <media/videobuf2-memops.h>
 
-#include <media/v4l2-device.h> /* v4l2 device */
+/* v4l2 device */
+#include <media/v4l2-device.h>
 #include <media/v4l2-ioctl.h>
-#include <media/v4l2-dev.h> /* video device */
-#include <media/videobuf2-core.h> /* vb2_mem_ops */
-#include <media/videobuf2-dma-contig.h> /* vb2, queue */
+/* video device */
+#include <media/v4l2-dev.h>
+/* vb2_mem_ops */
+#include <media/videobuf2-core.h>
+/* vb2, queue */
+#include <media/videobuf2-dma-contig.h>
+
+#include <linux/time.h>
 
 #include "btree-usb.h"
 #include "btree-v4l2.h"
+
+//#define USE_TIME_INFO
 
 extern int vb2_debug;
 static struct vb2_dc_buf {
@@ -86,9 +94,17 @@ static int btree_video_read_frame(struct btree_video *me)
 	struct vb2_dc_buf *dc_buf = NULL;
 	struct sg_table *sgt = NULL;
 	struct scatterlist *s = NULL;
-
+#ifdef	USE_TIME_INFO
+	struct timespec curr_tm;
+	unsigned int file_s, file_n, chunk_s, chunk_n;
+#endif
 	printk("[%s] \n", __func__);
 
+#ifdef	USE_TIME_INFO
+	getnstimeofday(&curr_tm);
+	file_s = curr_tm.tv_sec;
+	file_n = curr_tm.tv_nsec;
+#endif
 	if (!me->cur_buf)
 		return -ENOMEM;
 	printk(" call stream on function \n");
@@ -101,19 +117,44 @@ static int btree_video_read_frame(struct btree_video *me)
 	dc_buf = vb->planes[0].mem_priv;
 	sgt = dc_buf->dma_sgt;
 	for_each_sg(sgt->sgl, s, sgt->nents, i) {
-			if (sg_dma_len(s) > INT_MAX) {
-				pr_err("buf size is too big to be transferred at once \n");
-				return -ENOMEM;
+		if (sg_dma_len(s) > INT_MAX) {
+			pr_err("buf size is too big to be transferred at once \n");
+			return -ENOMEM;
+		}
+#ifdef	USE_TIME_INFO
+		if ((i > 50) && (i < 60)) {
+			getnstimeofday(&curr_tm);
+			chunk_s = curr_tm.tv_sec;
+			chunk_n = curr_tm.tv_nsec;
+		}
+#endif
+		ret = read_frame(me->priv, sg_dma_address(s), sg_dma_len(s));
+#ifdef	USE_TIME_INFO
+		if ((i > 50) && (i < 60)) {
+			getnstimeofday(&curr_tm);
+			chunk_s = curr_tm.tv_sec - chunk_s;
+			chunk_n = curr_tm.tv_nsec - chunk_n;
+			printk("TIME[%d]: sec[%d],milisec[%d] \n",
+				i,
+				chunk_s % 60,
+				chunk_n / 1000000);
 			}
-			ret = read_frame(me->priv, sg_dma_address(s), sg_dma_len(s));
+#endif
 	}
-
 	printk(" call stream off function \n");
 	ret = set_stream_onoff(me->priv, 0);
 	if (ret) {
 		pr_err(" failed to stream off \n");
 		return ret;
 	}
+#ifdef	USE_TIME_INFO
+	getnstimeofday(&curr_tm);
+	file_s = curr_tm.tv_sec - file_s;
+	file_n = curr_tm.tv_nsec - file_n;
+	printk(">>>>>End TIME: sec-%d, milisec%d \r\n",
+		file_s % 60,
+		file_n / 1000000);
+#endif
 	return ret;
 }
 
@@ -124,18 +165,35 @@ static void btree_video_read_handler(struct work_struct *work)
 	struct btree_video *me =
 		container_of(work, struct btree_video, read_work);
 
+#ifdef	USE_TIME_INFO
+	struct timespec curr_tm;
+	unsigned int file_s, file_n;
+#endif
 	pr_err("[%s] \n", __func__);
+#ifdef	USE_TIME_INFO
+	getnstimeofday(&curr_tm);
+	file_s = curr_tm.tv_sec;
+	file_n = curr_tm.tv_nsec;
+#endif
 	rv = btree_video_update_buffer(me);
 	if (rv) {
 		pr_err("failed to update buffer \n");
-		schedule_delayed_work(&me->read_work, 100);
+		schedule_delayed_work(&me->read_work, 50);
 	} else {
 		rv =  btree_video_read_frame(me);
 		if ( rv < 0)
 			pr_err("failed to read frame \n");
 		else {
 			btree_video_done_buffer(me);
-			schedule_delayed_work(&me->read_work, 50);
+#ifdef	USE_TIME_INFO
+			getnstimeofday(&curr_tm);
+			file_s = curr_tm.tv_sec - file_s;
+			file_n = curr_tm.tv_nsec - file_n;
+			printk("sec[%d],millisec[%d] \n",
+			file_s % 60,
+			file_n / 1000000);
+#endif
+			schedule_delayed_work(&me->read_work, 1);
 		}
 	}
 }
@@ -476,24 +534,21 @@ static int btree_video_get_format(struct file *file, void *fh,
 	return 0;
 }
 
-static void check_device_plane_size(
+static void set_sensor_output_size(
 		void *priv, int width, int height)
 {
 	int device_w = 0, device_h = 0;
-	unsigned int data = 0;
-
-	data = ((width << 16) | height);
-	if (!btree_write_reg(priv, 0x0000, data)) {
+	unsigned int data = 0x064004B0; /* 1600*1200 */
+	if (!btree_write_reg(priv, BTREE_REG_SENSOR_SIZE, data)) {
 		data = btree_read_reg(priv, 0x0000);
 		if(data > 0) {
 			device_w = ((data >> 16) & 0xFFFF);
 			device_h = data & 0xFFFF;
 			printk(" width[%d], height[%d] \n", device_w, device_h);
-			if ((device_w != width) || (device_h != height))
-				pr_err("width or height is not matched with the frame info\n");
 		} else
 			pr_err("failed to set width and height \n");
-	}
+	} else
+		pr_err("failed to set width and height \n");
 }
 
 static int btree_video_set_format(struct file *file, void *fh,
@@ -548,7 +603,7 @@ static int btree_video_set_format(struct file *file, void *fh,
 
 	printk("width = %d, height = %d,pixelformat = 0x%x, colorspace = %d, field = %d\n",
 			frame->width, frame->height, frame->format.pixelformat, colorspace, field);
-	check_device_plane_size(me->priv, frame->width, frame->height);
+	set_sensor_output_size(me->priv, frame->width, frame->height);
 
 	return 0;
 }
@@ -643,6 +698,52 @@ static int btree_video_streamoff(struct file *file, void *fh, enum v4l2_buf_type
    return -EINVAL;
 }
 
+static int btree_video_get_crop(struct file *file, void *fh, struct v4l2_crop *a)
+{
+	printk("[%s] \n", __func__);
+}
+
+static int btree_video_set_crop(struct file *file, void *fh,
+				const struct v4l2_crop *a)
+{
+	struct btree_video *me = file->private_data;
+	int data_h = 0, data_l = 0;
+	unsigned int data = 0;
+	unsigned int addr = 0;
+
+	printk("[%s] crop x-%d, y-%d, w-%d, h-%d \n",
+		__func__, a->c.left, a->c.top,
+		a->c.width, a->c.height);
+	addr = BTREE_REG_CROP_X_Y; /* crop start point x, y for ISP Input*/
+	data = (((a->c.left + 0x10) << 16) | (a->c.top + 0x10));
+	if (!btree_write_reg(me->priv, addr, data)) {
+		data = btree_read_reg(me->priv, addr);
+		if(data > 0) {
+			data_h = ((data >> 16) & 0xFFFF);
+			data_l = data & 0xFFFF;
+			printk(" start_x[%d], start_y[%d] \n", data_h, data_l);
+		} else
+			pr_err("failed to set crop position x and y \n");
+	} else
+		pr_err("failed to set 0x%x register \n", addr);
+	addr = BTREE_REG_CROP_SIZE; /* crop size  for ISP Input */
+	data = ((a->c.width << 16) | a->c.height);
+	if (!btree_write_reg(me->priv, addr, data)) {
+		data = btree_read_reg(me->priv, addr);
+		if(data > 0) {
+			data_h = ((data >> 16) & 0xFFFF);
+			data_l = data & 0xFFFF;
+			printk(" crop width[%d], crop height[%d] \n", data_h, data_l);
+		} else
+			pr_err("failed to set crop width and height \n");
+	} else
+		pr_err("failed to set 0x%x register \n", addr);
+	addr = BTREE_REG_USB_SIZE;
+	data = a->c.width;
+	if (btree_write_reg(me->priv, addr, data))
+		pr_err("failed to set 0x%x register \n", (addr&0x0FFF));
+}
+
 static struct v4l2_ioctl_ops btree_video_ioctl_ops = {
 	.vidioc_querycap		= btree_video_querycap,
 	.vidioc_g_fmt_vid_cap		= btree_video_get_format,
@@ -655,6 +756,8 @@ static struct v4l2_ioctl_ops btree_video_ioctl_ops = {
 	.vidioc_dqbuf                   = btree_video_dqbuf,
 	.vidioc_streamon                = btree_video_streamon,
 	.vidioc_streamoff               = btree_video_streamoff,
+	.vidioc_g_crop			= btree_video_get_crop,
+	.vidioc_s_crop			= btree_video_set_crop,
 };
 
 /*

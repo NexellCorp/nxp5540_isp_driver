@@ -75,6 +75,7 @@ MODULE_DEVICE_TABLE(usb, btree_table);
 #define BTREE_USB_RET_SIZE 8 //64
 #define BTREE_SENSOR_ID 0x82
 
+#define BTREE_MAX_PAGE_NUM 4
 /* structures */
 struct btree_usb {
 	struct  usb_device  *udev;
@@ -351,15 +352,21 @@ unsigned int address, unsigned int data)
 	unsigned int addr_h = 0, addr_l = 0;
 	unsigned int data_h =0, data_l = 0;
 	struct btree_usb *udev = priv;
+	unsigned int page_num = (address >> 12) & 0xF;
 
 	dev_info(&udev->interface->dev,
-			"[%s] \n", __func__);
-	data_h = (( data >> 16) & 0xFFFF );
-	data_l = (data&0xFFFF);
+			"[%s] page num = %d \n",
+			__func__, page_num);
+	if (page_num > BTREE_MAX_PAGE_NUM) {
+		data_h = data;
+		addr_h = (address & 0x0FFF);
+	} else {
+		data_h = (( data >> 16) & 0xFFFF );
+		data_l = (data&0xFFFF);
 
-	addr_h = ((address >> 7) & 0x01FE);
-	addr_l = ((address << 1) & 0x01FE) | 0x0200;
-
+		addr_h = ((address >> 7) & 0x01FE);
+		addr_l = ((address << 1) & 0x01FE) | 0x0200;
+	}
 	ret = btree_ctrl_msg(udev, USB_CMD_MCU_HOLD,
 						USB_DIR_IN, 1,
 						buf, BTREE_USB_RET_SIZE);
@@ -367,21 +374,23 @@ unsigned int address, unsigned int data)
 		dev_err(&udev->interface->dev, "failed to hold mcu \n");
 		return ret;
 	}
-
 	ret = btree_i2c_write(udev, USB_CMD_I2C_WRITE_16,
 						data_h, addr_h,
 						buf, BTREE_USB_RET_SIZE);
 	if (ret) {
 		dev_err(&udev->interface->dev, "failed to read register\n");
-		return ret;
+		goto done;
 	}
+	if (page_num > BTREE_MAX_PAGE_NUM)
+		goto done;
 	ret = btree_i2c_write(udev, USB_CMD_I2C_WRITE_16,
 						data_l, addr_l,
 						buf, BTREE_USB_RET_SIZE);
 	if (ret) {
 		dev_err(&udev->interface->dev, "failed to read register\n");
-		return ret;
+		goto done;
 	}
+done:
 	ret = btree_ctrl_msg(udev, USB_CMD_MCU_HOLD,
 						USB_DIR_IN, 0,
 						buf, BTREE_USB_RET_SIZE);
@@ -438,7 +447,7 @@ void *priv, int enable)
 		return ret;
 	}
 	dev_info(&dev->interface->dev,
-			"capture enable status is %d \n", buf[0]);
+			"changing capture status is %s \n", (buf[0])?"succeed":"failed");
 	if (!buf[0])
 		ret = -EFAULT;
 
@@ -529,9 +538,11 @@ retry:
 			goto retry;
 	}
 exit:
-	dev_info(&dev->interface->dev,
+	if (rv < 0)
+		dev_info(&dev->interface->dev,
 			"ret:%d, filled:%d, copied:%d,bufsize:%d \n",
 			rv, dev->bulk_in_filled, dev->bulk_in_copied, count);
+
 	return rv;
 }
 

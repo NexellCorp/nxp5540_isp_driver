@@ -19,6 +19,11 @@
 #ifndef __BTREE_USB_H
 #define __BTREE_USB_H
 
+#define BTREE_REG_SENSOR_SIZE	0x0000
+#define BTREE_REG_CROP_X_Y	0x1024
+#define	BTREE_REG_CROP_SIZE	0x1028
+#define BTREE_REG_USB_SIZE	0x5E06
+
 unsigned int btree_read_reg(void *priv,
 							unsigned int address);
 
@@ -32,6 +37,5 @@ int btree_capture_enable(void *priv,
 
 ssize_t btree_read_frame(void *priv,
 						dma_addr_t buffer, size_t count);
-
 
 #endif

@@ -6,7 +6,8 @@ obj-m += btree.o
 btree-objs := videobuf2-dma-contig.o btree-v4l2.o btree-usb.o
 
 all:
-	make -C /lib/modules/$(shell uname -r)/build M=$(CURDIR) modules #-L /usr/include/
+	make -C /lib/modules/$(shell uname -r)/build M=$(CURDIR) modules
+	#-L /usr/include/
 	#make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
 clean:
 	#make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
