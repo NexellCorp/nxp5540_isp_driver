@@ -51,6 +51,8 @@
 
 //#define USE_TIME_INFO
 
+#define to_btree_video_buffer(buf) container_of(buf, struct btree_video_buffer, vb)
+
 extern int vb2_debug;
 static struct vb2_dc_buf {
 	struct device           *dev;
@@ -68,6 +70,13 @@ static struct vb2_dc_buf {
 	/* DMABUF related */
 	struct dma_buf_attachment   *db_attach;
 };
+
+static struct btree_video_buffer *btree_video_update_buffer
+(struct btree_video *me, bool remove);
+
+static void btree_video_done_buffer
+(struct btree_video *me, struct btree_video_buffer *buf);
+
 static int set_stream_onoff(void *priv, int onoff)
 {
 	int ret = -EINVAL;
@@ -86,7 +95,8 @@ static int read_frame(void *priv,
 	return ret;
 }
 
-static int btree_video_read_frame(struct btree_video *me)
+static int btree_video_read_frame(struct btree_video *me,
+				  struct btree_video_buffer *cur_buf)
 {
 	int ret = -EINVAL;
 	unsigned int i = 0;
@@ -105,7 +115,7 @@ static int btree_video_read_frame(struct btree_video *me)
 	file_s = curr_tm.tv_sec;
 	file_n = curr_tm.tv_nsec;
 #endif
-	if (!me->cur_buf)
+	if (!cur_buf)
 		return -ENOMEM;
 	printk(" call stream on function \n");
 	ret = set_stream_onoff(me->priv, 1);
@@ -113,7 +123,7 @@ static int btree_video_read_frame(struct btree_video *me)
 		pr_err(" failed to stream on \n");
 		return ret;
 	}
-	vb = me->cur_buf->priv;
+	vb = cur_buf->vb.vb2_buf;
 	dc_buf = vb->planes[0].mem_priv;
 	sgt = dc_buf->dma_sgt;
 	for_each_sg(sgt->sgl, s, sgt->nents, i) {
@@ -162,6 +172,7 @@ static int btree_video_read_frame(struct btree_video *me)
 static void btree_video_read_handler(struct work_struct *work)
 {
 	int rv = -1;
+	struct btree_video_buffer *buf = NULL;
 	struct btree_video *me =
 		container_of(work, struct btree_video, read_work);
 
@@ -175,16 +186,17 @@ static void btree_video_read_handler(struct work_struct *work)
 	file_s = curr_tm.tv_sec;
 	file_n = curr_tm.tv_nsec;
 #endif
-	rv = btree_video_update_buffer(me);
-	if (rv) {
+	buf = btree_video_update_buffer(me, false);
+	if (!buf) {
 		pr_err("failed to update buffer \n");
 		schedule_delayed_work(&me->read_work, 50);
 	} else {
-		rv =  btree_video_read_frame(me);
+		rv =  btree_video_read_frame(me, buf);
 		if ( rv < 0)
 			pr_err("failed to read frame \n");
 		else {
-			btree_video_done_buffer(me);
+			btree_video_done_buffer(me, buf);
+			btree_video_update_buffer(me, true);
 #ifdef	USE_TIME_INFO
 			getnstimeofday(&curr_tm);
 			file_s = curr_tm.tv_sec - file_s;
@@ -239,54 +251,6 @@ static int set_plane_size(struct btree_video_frame *frame, unsigned int sizes[])
 	return 0;
 }
 
-static void fill_btree_video_buffer(struct btree_video_buffer *buf,
-		                                 struct vb2_buffer *vb)
-{
-	int i;
-	uint32_t type = vb->vb2_queue->type;
-	struct btree_video *me = vb->vb2_queue->drv_priv;
-	struct btree_video_frame *frame;
-	bool is_separated;
-
-	printk("[%s] \n", __func__);
-
-    if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
-		type == V4L2_BUF_TYPE_VIDEO_CAPTURE)
-		frame = &me->frame[0];
-	else
-		frame = &me->frame[1];
-	is_separated = frame->format.is_separated;
-
-	printk("planes = %d, separated = %d \n",
-			is_separated, frame->format.num_sw_planes);
-
-	for (i = 0; i < frame->format.num_sw_planes; i++) {
-		if (i == 0 || is_separated)
-			buf->dma_addr[i] = vb2_dma_contig_plane_dma_addr(vb, i);
-		else
-			buf->dma_addr[i] =
-				buf->dma_addr[i-1] + frame->size[i-1];
-
-		if (!buf->dma_addr[i]) BUG();
-		buf->stride[i] = frame->stride[i];
-		printk("[BUF plane %d] addr(0x%x), s(%d)\n",
-				i, (int)buf->dma_addr[i], buf->stride[i]);
-	}
-
-}
-
-static int buffer_done(struct btree_video_buffer *buf)
-{
-	struct vb2_buffer *vb = buf->priv;
-
-	pr_err("[%s] \n", __func__);
-
-	vb2_buffer_done(vb, VB2_BUF_STATE_DONE);
-	return 0;
-}
-
-
-
 /*
  * queue_setup() called from vb2_reqbufs()
  * setup plane number, plane size
@@ -299,16 +263,14 @@ static int btree_vb2_queue_setup(struct vb2_queue *q,
 {
 	int ret;
 	int i;
-	struct btree_video *me = q->drv_priv;
+	struct btree_video *me = vb2_get_drv_priv(q);
 	struct btree_video_frame *frame = NULL;
 
 	printk("[%s]\n",__func__);
 
 	if (q->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
 		q->type == V4L2_BUF_TYPE_VIDEO_CAPTURE)
-		frame = &me->frame[0];
-	else
-		frame = &me->frame[1];
+		frame = &me.frame;
 	if (!frame) {
 		pr_err("[btree video] can't find frame for q type(0x%x)\n",
 				q->type);
@@ -329,88 +291,50 @@ static int btree_vb2_queue_setup(struct vb2_queue *q,
 
 static int btree_vb2_buf_init(struct vb2_buffer *vb)
 {
-	struct btree_video_buffer **bufs;
-	struct btree_video_buffer *buf;
-	struct btree_video *me = vb->vb2_queue->drv_priv;
-	int index = vb->index;
-	uint32_t type = vb->vb2_queue->type;
-	pr_err("%s: type(0x%x)\n", __func__, type);
-
-	bufs = me->bufs;
-
-	pr_err("index is %d \n", index);
-	if (!bufs[index]) {
-		 buf = kzalloc(sizeof(*buf), GFP_KERNEL);
-		 if (!buf) {
-			 WARN_ON(1);
-			 return -ENOMEM;
-		 }
-		 buf->priv = vb;
-		 buf->cb_buf_done = buffer_done;
-		 bufs[index]  = buf;
-		 pr_err("bufs[%d]->db_buf_done : 0x%x \n",
-				 index, bufs[index]->cb_buf_done);
-	 }
-	 return 0;
+	printk("[%s] \n", __func__);
+	return 0;
 }
 
 
 static void btree_vb2_buf_cleanup(struct vb2_buffer *vb)
 {
-	struct btree_video_buffer **bufs;
-	struct btree_video_buffer *buf;
-	struct btree_video *me = vb->vb2_queue->drv_priv;
-	int index = vb->index;
-
-	bufs = me->bufs;
-
-	buf = bufs[index];
-	kfree(buf);
-	bufs[index] = NULL;
+	printk("[%s] \n", __func__);
+	return 0;
 }
 
 /* real queue */
-int btree_video_update_buffer(struct btree_video *me)
+static struct btree_video_buffer *btree_video_update_buffer
+(struct btree_video *me, bool remove)
 {
 	unsigned long flags;
 	struct btree_video_buffer *buf;
 
 	pr_err("[%s] \n", __func__);
 	spin_lock_irqsave(&me->slock, flags);
-	if (me->buffer_count == 0) {
-		pr_err(" buffer count is null \n");
-		me->cur_buf = NULL;
+	if (list_empty(&me->buffer_list)) {
+		pr_err("list is empty \n");
 		spin_unlock_irqrestore(&me->slock, flags);
 		return -ENOENT;
 	}
 	buf = list_first_entry(&me->buffer_list, struct btree_video_buffer, list);
-	list_del_init(&buf->list);
-	me->cur_buf = buf;
-	me->buffer_count--;
+	if (remove)
+		list_del_init(&buf->list);
 	spin_unlock_irqrestore(&me->slock, flags);
-	return 0;
+	return buf;
 }
 
-void btree_video_done_buffer(struct btree_video *me)
+static void btree_video_done_buffer
+(struct btree_video *me, struct btree_video_buffer *buf)
 {
 	unsigned long flags;
-	struct btree_video_buffer *buf;
 
-	pr_err("[%s]\n",__func__);
-
-	spin_lock_irqsave(&me->slock, flags);
-	buf = me->cur_buf;
-	me->cur_buf = NULL;
-	spin_unlock_irqrestore(&me->slock, flags);
+	prinktk("[%s]\n",__func__);
 
 	if (!buf) {
 		pr_err(" buf is null \n");
 		return;
 	}
-	if (buf->cb_buf_done) {
-		pr_err("call cb_buf_done \n");
-		buf->cb_buf_done(buf);
-	}
+	vb2_buffer_done(buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
 }
 
 static void btree_video_clear_buffer(struct btree_video *me)
@@ -420,73 +344,58 @@ static void btree_video_clear_buffer(struct btree_video *me)
 
 	spin_lock_irqsave(&me->slock, flags);
 
-	if(me->buffer_count > 0) {
-		while (!list_empty(&me->buffer_list)) {
-				buf = list_entry(me->buffer_list.next,
-							struct btree_video_buffer, list);
-				if (buf) {
-						struct vb2_buffer *vb = buf->priv;
-						vb2_buffer_done(vb, VB2_BUF_STATE_ERROR);
-						list_del_init(&buf->list);
-				} else
-					break;
-		}
-		INIT_LIST_HEAD(&me->buffer_list);
+	while (!list_empty(&me->buffer_list)) {
+		buf = list_entry(me->buffer_list.next,
+				 struct btree_video_buffer, list);
+		if (buf) {
+			struct vb2_buffer *vb = buf->priv;
+			vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+			list_del_init(&buf->list);
+		} else
+			break;
 	}
-	me->buffer_count = 0;
-	me->cur_buf = NULL;
-
-	spin_unlock_irqrestore(&me->slock, flags);
-}
-
-void btree_video_init_vbuf(struct btree_video *me)
-{
-	spin_lock_init(&me->slock);
 	INIT_LIST_HEAD(&me->buffer_list);
-	me->buffer_count = 0;
-	me->cur_buf = NULL;
-}
-
-void btree_video_add_buffer(struct btree_video *me, struct btree_video_buffer *buf)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&me->slock, flags);
-	list_add_tail(&buf->list, &me->buffer_list);
-	me->buffer_count++;
 	spin_unlock_irqrestore(&me->slock, flags);
 }
 
 void btree_vb2_buf_queue(struct vb2_buffer *vb)
 {
-	struct btree_video *me = vb->vb2_queue->drv_priv;
-	struct btree_video_buffer *buf;
+	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
+	struct btree_video *me = vb2_get_drv_priv(vb->vb2_queue);
+	struct btree_video_buffer *buf = to_btree_video_buffer(vbuf);
 
 	printk("[%s] \n",__func__);
-	buf = me->bufs[vb->index];
-	printk(" buf = 0x%x, index = %d \n", me->bufs[vb->index], vb->index);
+	printk(" buf = 0x%x, index = %d \n", buf, vb->index);
 
-	fill_btree_video_buffer(buf, vb);
-    btree_video_add_buffer(me, buf);
+	spin_lock_irqsave(&me->slock, flags);
+	list_add_tail(&buf->list, &me->buffer_list);
+	spin_unlock_irqrestore(&me->slock, flags);
 }
 
 static int btree_vb2_buf_finish(struct vb2_buffer *vb)
 {
-	struct vb2_queue *q;
+	printk("[%s] state = %d \n", __func__, vb->state);
+	return 0;
+}
 
-	printk("[%s] \n",__func__);
-	q = vb->vb2_queue;
-	printk("done = %d, error = %d, vb state = %d \n", \
-			VB2_BUF_STATE_DONE, VB2_BUF_STATE_ERROR, vb->state);
+static int btree_vb2_buf_prepare(struct vb2_buffer *vb)
+{
+	int i;
+	btree_video *me = vb2_get_drv_priv(vb->vb2_queue);
+
+	printk("[%s]\n", __func__);
+	for (i = 0; i < vb->num_planes; i++)
+		vb2_set_palne_payload(vb, i, me->frame.sizes[i]);
 	return 0;
 }
 
 static struct vb2_ops btree_vb2_ops = {
 	.queue_setup    = btree_vb2_queue_setup,
-	.buf_init   = btree_vb2_buf_init,
+	.buf_prepare	= btree_vb2_buf_prepare,
+	.buf_init   	= btree_vb2_buf_init,
 	.buf_cleanup    = btree_vb2_buf_cleanup,
-	.buf_queue  = btree_vb2_buf_queue,
-	.buf_finish = btree_vb2_buf_finish
+	.buf_queue  	= btree_vb2_buf_queue,
+	.buf_finish 	= btree_vb2_buf_finish
 };
 
 
@@ -497,7 +406,7 @@ static struct vb2_ops btree_vb2_ops = {
 static int btree_video_querycap(struct file *file, void *fh,
 							struct v4l2_capability	*cap)
 {
-	struct btree_video *me = file->private_data;
+	struct btree_video *me = video_drvdata(file);
 
 	printk("[%s] \n",__func__);
 	strlcpy(cap->driver, me->name, sizeof(cap->driver));
@@ -530,7 +439,7 @@ static int btree_video_querycap(struct file *file, void *fh,
 static int btree_video_get_format(struct file *file, void *fh,
 							   struct v4l2_format *f)
 {
-	pr_debug("%s \n", __func__);
+	printk("%s \n", __func__);
 	return 0;
 }
 
@@ -539,7 +448,7 @@ static void set_sensor_output_size(
 {
 	int device_w = 0, device_h = 0;
 	unsigned int data = 0x064004B0; /* 1600*1200 */
-	if (!btree_write_reg(priv, BTREE_REG_SENSOR_SIZE, data)) {
+	if (!btree_write_reg(priv, BTREE_REG_TYPE_ISP, BTREE_REG_SENSOR_SIZE, data)) {
 		data = btree_read_reg(priv, 0x0000);
 		if(data > 0) {
 			device_w = ((data >> 16) & 0xFFFF);
@@ -554,7 +463,7 @@ static void set_sensor_output_size(
 static int btree_video_set_format(struct file *file, void *fh,
 							struct v4l2_format *f)
 {
-	struct btree_video *me = file->private_data;
+	struct btree_video *me = video_drvdata(file);
 	struct btree_video_frame *frame;
 	uint32_t width, height, pixelformat, colorspace, field;
 
@@ -567,10 +476,7 @@ static int btree_video_set_format(struct file *file, void *fh,
 	me->vbq->type = f->type;
 	if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
 		f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE) {
-		frame = &me->frame[0];
-	} else if (f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ||
-		f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT) {
-		frame = &me->frame[1];
+		frame = &me.frame;
 	} else {
 		pr_err("[btree video] set format: invalid type(0x%x)\n", f->type);
 		return -EINVAL;
@@ -611,7 +517,7 @@ static int btree_video_set_format(struct file *file, void *fh,
 static int btree_video_reqbufs(struct file *file, void *fh,
 							struct v4l2_requestbuffers *b)
 {
-	struct btree_video *me = file->private_data;
+	struct btree_video *me = video_drvdata(file);
 
 	printk("[%s]\n",__func__);
 
@@ -623,7 +529,7 @@ static int btree_video_reqbufs(struct file *file, void *fh,
 static int btree_video_querybuf(struct file *file, void *fh,
 							struct v4l2_buffer *b)
 {
-	struct btree_video *me = file->private_data;
+	struct btree_video *me = video_drvdata(file);
 	printk("[%s]\n",__func__);
 	if (me->vbq)
 		return vb2_querybuf(me->vbq, b);
@@ -633,7 +539,7 @@ static int btree_video_querybuf(struct file *file, void *fh,
 static int btree_video_qbuf(struct file *file, void *fh,
 						struct v4l2_buffer *b)
 {
-	struct btree_video *me = file->private_data;
+	struct btree_video *me = video_drvdata(file);
 	int ret = -EINVAL;
 
 	printk("[%s]\n",__func__);
@@ -647,22 +553,22 @@ static int btree_video_qbuf(struct file *file, void *fh,
 static int btree_video_dqbuf(struct file *file, void *fh,
 						struct v4l2_buffer *b)
 {
-	struct btree_video *me = file->private_data;
+	struct btree_video *me = video_drvdata(file);
 	int ret = -EINVAL;
 
-	pr_err("[%s]\n",__func__);
+	printk("[%s]\n",__func__);
 
 	if (me->vbq) {
 		ret = vb2_dqbuf(me->vbq, b, file->f_flags & O_NONBLOCK);
 	}
-	pr_err("ret = %d \n",ret);
+	printk("ret = %d \n",ret);
 	return ret;
 }
 
 static int btree_video_streamon(struct file *file, void *fh, enum v4l2_buf_type i)
 {
 	int ret = -EINVAL;
-	struct btree_video *me = file->private_data;
+	struct btree_video *me = video_drvdata(file);
 
 	printk("[%s]\n",__func__);
 	if (me->vbq) {
@@ -679,7 +585,7 @@ static int btree_video_streamon(struct file *file, void *fh, enum v4l2_buf_type 
 
 static int btree_video_streamoff(struct file *file, void *fh, enum v4l2_buf_type i)
 {
-	struct btree_video *me = file->private_data;
+	struct btree_video *me = video_drvdata(file);
 	int ret;
 
 	printk("[%s]\n",__func__);
@@ -706,7 +612,7 @@ static int btree_video_get_crop(struct file *file, void *fh, struct v4l2_crop *a
 static int btree_video_set_crop(struct file *file, void *fh,
 				const struct v4l2_crop *a)
 {
-	struct btree_video *me = file->private_data;
+	struct btree_video *me = video_drvdata(file);
 	int data_h = 0, data_l = 0;
 	unsigned int data = 0;
 	unsigned int addr = 0;
@@ -716,7 +622,7 @@ static int btree_video_set_crop(struct file *file, void *fh,
 		a->c.width, a->c.height);
 	addr = BTREE_REG_CROP_X_Y; /* crop start point x, y for ISP Input*/
 	data = (((a->c.left + 0x10) << 16) | (a->c.top + 0x10));
-	if (!btree_write_reg(me->priv, addr, data)) {
+	if (!btree_write_reg(me->priv, BTREE_REG_TYPE_ISP, addr, data)) {
 		data = btree_read_reg(me->priv, addr);
 		if(data > 0) {
 			data_h = ((data >> 16) & 0xFFFF);
@@ -728,7 +634,7 @@ static int btree_video_set_crop(struct file *file, void *fh,
 		pr_err("failed to set 0x%x register \n", addr);
 	addr = BTREE_REG_CROP_SIZE; /* crop size  for ISP Input */
 	data = ((a->c.width << 16) | a->c.height);
-	if (!btree_write_reg(me->priv, addr, data)) {
+	if (!btree_write_reg(me->priv, BTREE_REG_TYPE_ISP, addr, data)) {
 		data = btree_read_reg(me->priv, addr);
 		if(data > 0) {
 			data_h = ((data >> 16) & 0xFFFF);
@@ -740,8 +646,65 @@ static int btree_video_set_crop(struct file *file, void *fh,
 		pr_err("failed to set 0x%x register \n", addr);
 	addr = BTREE_REG_USB_SIZE;
 	data = a->c.width;
-	if (btree_write_reg(me->priv, addr, data))
+	if (btree_write_reg(me->priv, BTREE_REG_TYPE_SENSOR, addr, data))
 		pr_err("failed to set 0x%x register \n", (addr&0x0FFF));
+}
+
+static int btree_video_get_register(struct file *file, void *fh, struct v4l2_dbg_register *a)
+{
+	struct btree_video *me = video_drvdata(file);
+	int ret = -1;
+	unsigned int data = 0;
+
+	printk("[%s] \n", __func__);
+	printk("addr:0x%4x, val:0x%8x, type:%d \n",
+		a->reg, a->val, a->match.type);
+	data = btree_read_reg(me->priv, a->reg);
+	if (data < 0)
+		pr_err("failed to get register:0x%4x \n", a->reg);
+	else {
+		a->val = data;
+		ret = 0;
+	}
+	return ret;
+}
+
+static int btree_video_set_register(struct file *file, void *fh, struct v4l2_dbg_register *a)
+{
+	struct btree_video *me = video_drvdata(file);
+	int ret = -1, type;
+
+	printk("[%s] \n", __func__);
+	printk("addr:0x%4x, val:0x%8x, type:%d \n",
+		a->reg, a->val, a->match.addr);
+	if (!a->match.addr)
+		type = BTREE_REG_TYPE_ISP;
+	else
+		type = BTREE_REG_TYPE_SENSOR;
+
+	if (btree_write_reg(me->priv, type, a->reg, a->val))
+		pr_err("failed to set register:0x%4x \n", a->reg);
+	else {
+		ret = 0;
+	}
+	return ret;
+}
+
+static int btree_video_get_chip_info
+(struct file *file, void *fh, struct v4l2_dbg_chip_info *a)
+{
+	printk("[%s] \n", __func__);
+}
+
+static int btree_video_prepare_buf
+(struct file *file, void *fh, struct v4l2_buffer *b)
+{
+	struct btree_video *me = video_drvdata(file);
+	int ret;
+	mutex_lock(&me->slock);
+	vb2_prepare_buf(&me->vbq, b);
+	mutex_unlock(&me->slock);
+	return ret;
 }
 
 static struct v4l2_ioctl_ops btree_video_ioctl_ops = {
@@ -758,6 +721,10 @@ static struct v4l2_ioctl_ops btree_video_ioctl_ops = {
 	.vidioc_streamoff               = btree_video_streamoff,
 	.vidioc_g_crop			= btree_video_get_crop,
 	.vidioc_s_crop			= btree_video_set_crop,
+	.vidioc_s_register		= btree_video_set_register,
+	.vidioc_g_register		= btree_video_get_register,
+	.vidioc_g_chip_info		= btree_video_get_chip_info,
+	.vidioc_prepare_buf		= btree_video_prepare_buf,
 };
 
 /*
@@ -775,6 +742,8 @@ static int btree_video_open(struct file *file)
 	int ret = 0;
 
 	printk("[%s]\n",__func__);
+	spin_lock_init(&me->slock);
+	INIT_LIST_HEAD(&me->buffer_list);
 	if (me->open_count == 0) {
 		memset(me->frame, 0, sizeof(struct btree_video_frame)*2);
 	}
@@ -882,7 +851,6 @@ struct btree_video *btree_video_create(char *name, uint32_t type,
 			kfree(me);
 		return NULL;
 	}
-	btree_video_init_vbuf(me);
 
 	printk(" success to register video device %s \n",
 			me->vdev.name);

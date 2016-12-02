@@ -75,7 +75,6 @@ MODULE_DEVICE_TABLE(usb, btree_table);
 #define BTREE_USB_RET_SIZE 8 //64
 #define BTREE_SENSOR_ID 0x82
 
-#define BTREE_MAX_PAGE_NUM 4
 /* structures */
 struct btree_usb {
 	struct  usb_device  *udev;
@@ -344,7 +343,7 @@ void *priv, unsigned int address)
 	return data;
 }
 
-int btree_write_reg(void *priv,
+int btree_write_reg(void *priv, int type,
 unsigned int address, unsigned int data)
 {
 	int ret = -ENODEV;
@@ -357,7 +356,7 @@ unsigned int address, unsigned int data)
 	dev_info(&udev->interface->dev,
 			"[%s] page num = %d \n",
 			__func__, page_num);
-	if (page_num > BTREE_MAX_PAGE_NUM) {
+	if (type == BTREE_REG_TYPE_SENSOR) {
 		data_h = data;
 		addr_h = (address & 0x0FFF);
 	} else {
@@ -381,7 +380,7 @@ unsigned int address, unsigned int data)
 		dev_err(&udev->interface->dev, "failed to read register\n");
 		goto done;
 	}
-	if (page_num > BTREE_MAX_PAGE_NUM)
+	if (type == BTREE_REG_TYPE_SENSOR)
 		goto done;
 	ret = btree_i2c_write(udev, USB_CMD_I2C_WRITE_16,
 						data_l, addr_l,
@@ -462,7 +461,6 @@ static void btree_delete(struct kref *kref)
 	pr_debug("[%s] \n", __func__);
 	usb_free_urb(dev->bulk_in_urb);
 	usb_put_dev(dev->udev);
-	kfree(dev->bulk_in_buffer);
 	kfree(dev);
 }
 
@@ -898,7 +896,7 @@ static int btree_probe (struct usb_interface *interface,
 							"Could not allocate bulk_in_urb \n");
 					goto error;
 				}
-				dev->bulk_in_buffer = kmalloc(buffer_size, GFP_KERNEL);
+				dev->bulk_in_buffer = devm_kmalloc(buffer_size, GFP_KERNEL);
 				if (!dev->bulk_in_buffer) {
 					dev_err(&interface->dev,
 							"Could not allocate bulk_in_buffer \n");

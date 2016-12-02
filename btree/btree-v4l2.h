@@ -43,17 +43,11 @@ struct btree_video_frame {
 };
 
 struct btree_video_buffer;
-typedef int (*btree_video_buf_done)(struct btree_video_buffer *);
 
 struct btree_video_buffer {
+	struct vb2_v4l2_buffer vb;
 	struct list_head	 list;
-	dma_addr_t	dma_addr[BTREE_VIDEO_MAX_PLANES];
-	uint32_t	stride[BTREE_VIDEO_MAX_PLANES];
-	void *priv; /* struct vb2_buffer */
-	btree_video_buf_done cb_buf_done;
 };
-
-typedef int (*btree_queue_func)(struct btree_video_buffer *, void*);
 
 enum btree_video_type {
 	BTREE_VIDEO_TYPE_CAPTURE = 0,
@@ -75,16 +69,12 @@ struct btree_video {
 	/*queue */
 	spinlock_t slock;
 	struct list_head buffer_list;
-	int	buffer_count;
-	struct btree_video_buffer *cur_buf;
 	struct delayed_work read_work;
 
 	struct mutex lock; /* for video_device */
 	struct video_device vdev;
 
-	/* frame[0] : sink, capture
-	   frame[1] : source, out */
-	struct btree_video_frame frame[2];
+	struct btree_video_frame frame;
 	uint32_t open_count;
 
 	/* for saving btree_usb pointer */
@@ -92,21 +82,12 @@ struct btree_video {
 };
 
 /* macros */
-#define vdev_to_btree_video(vdev) container_of(vdev, struct btree_video, video)
-#define vbq_to_btree_video(vbq) container_of(vbq, struct btree_video, vbq)
-
 /* public functions */
 
 struct btree_video *btree_video_create
 (char *, uint32_t, struct v4l2_device *, void *);
-
 void btree_video_cleanup(struct btree_video *);
-
 int btree_v4l2_register_device
 (struct device *dev, struct v4l2_device *v4l2_dev);
-
 int btree_v4l2_unregister_device(struct v4l2_device *v4l2_dev);
-
-void btree_video_done_buffer(struct btree_video *me);
-int btree_video_update_buffer(struct btree_video *me);
 #endif

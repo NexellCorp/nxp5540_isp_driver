@@ -24,11 +24,16 @@
 #define	BTREE_REG_CROP_SIZE	0x1028
 #define BTREE_REG_USB_SIZE	0x5E06
 
+typedef enum btree_reg_type {
+	BTREE_REG_TYPE_ISP = 0,
+	BTREE_REG_TYPE_SENSOR,
+};
+
 unsigned int btree_read_reg(void *priv,
 							unsigned int address);
 
-int btree_write_reg(void *priv,
-					unsigned int address, unsigned int data);
+int btree_write_reg(void *priv, int type,
+		unsigned int address, unsigned int data);
 
 int btree_check_device(void *priv);
 

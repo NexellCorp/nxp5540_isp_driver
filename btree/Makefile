@@ -1,9 +1,8 @@
-#obj-m += btree-v4l2.o
-#obj-m += btree-usb.o
 obj-m += btree.o
-#obj-m += v4l2-ioctl.o
 #btree-objs := videobuf2-core.o videobuf2-v4l2.o videobuf2-dma-contig.o btree-v4l2.o btree-usb.o
-btree-objs := videobuf2-dma-contig.o btree-v4l2.o btree-usb.o
+#btree-objs := v4l2-device.o videobuf2-dma-contig.o btree-v4l2.o btree-usb.o
+btree-objs := v4l2-ioctl.o videobuf2-dma-contig.o btree-v4l2.o btree-usb.o
+#btree-objs := btree-v4l2.o btree-usb.o
 
 all:
 	make -C /lib/modules/$(shell uname -r)/build M=$(CURDIR) modules
